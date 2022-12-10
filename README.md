@@ -1,5 +1,5 @@
 # Secure-Processor-Microarch
-## Solutions to assignments of Secure Processor Microarchitecture (CS6630, Jul-Nov 2022) in IIT Madras
+## Solutions to assignments of CS6630 (Jul-Nov 2022) in IIT Madras
 
 A1: T-table implementation of CLEFIA and timing attack on password checker
 A2: Recovery of some round keys from traces for CLEFIA using power attacks
